@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TicklePickle Match Builder</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="header">
+        <div>
+          <p class="eyebrow">Reclub social sessions</p>
+          <h1>TicklePickle Match Builder</h1>
+          <p class="lede">
+            Paste players, choose courts and rounds, then generate balanced pickleball doubles matches for a social session.
+          </p>
+        </div>
+        <div class="summary" aria-live="polite">
+          <span id="playerCount">0 players</span>
+          <span id="courtSummary">3 courts</span>
+          <span id="roundSummary">4 rounds</span>
+        </div>
+      </section>
+
+      <section class="workspace" aria-label="Match generator">
+        <aside class="panel inputs">
+          <div class="panelHeader">
+            <h2>Session Setup</h2>
+            <button class="iconButton" id="loadSample" type="button" title="Load sample players" aria-label="Load sample players">↻</button>
+          </div>
+
+          <label class="field">
+            <span>Players</span>
+            <textarea id="playersInput" spellcheck="false" placeholder="One player per line&#10;Alicia, 3.5&#10;Ben, 3.0&#10;Chen, 4.0"></textarea>
+          </label>
+
+          <div class="hint">
+            Add optional skill after a comma. Example: <strong>Maya, 3.5</strong>
+          </div>
+
+          <label class="field">
+            <span>Fixed pairs</span>
+            <textarea id="fixedPairsInput" class="compactText" spellcheck="false" placeholder="One pair per line&#10;Alicia + Ben&#10;Chen + Divya"></textarea>
+          </label>
+
+          <div class="hint">
+            These players will stay together as a doubles team whenever they are scheduled.
+          </div>
+
+          <div class="settingsGrid">
+            <label class="field">
+              <span>Courts</span>
+              <input id="courtCount" type="number" min="1" max="12" value="3" />
+            </label>
+            <label class="field">
+              <span>Rounds</span>
+              <input id="roundCount" type="number" min="1" max="50" value="4" />
+            </label>
+            <label class="field">
+              <span>Players per court</span>
+              <select id="playersPerCourt">
+                <option value="4" selected>Doubles</option>
+                <option value="2">Singles</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Balance style</span>
+              <select id="balanceStyle">
+                <option value="social" selected>Social mix</option>
+                <option value="skill">Closest skill</option>
+                <option value="shuffle">Pure shuffle</option>
+              </select>
+            </label>
+          </div>
+
+          <label class="toggle">
+            <input id="avoidRepeats" type="checkbox" checked />
+            <span>Avoid repeat partners where possible</span>
+          </label>
+
+          <label class="toggle">
+            <input id="rotateSits" type="checkbox" checked />
+            <span>Rotate sit-outs fairly</span>
+          </label>
+
+          <button class="primary" id="generateBtn" type="button">Generate Matches</button>
+        </aside>
+
+        <section class="panel results">
+          <div class="panelHeader">
+            <div>
+              <h2>Generated Schedule</h2>
+              <p id="statusText">Add players to start.</p>
+            </div>
+            <div class="actions">
+              <button id="copyBtn" type="button" disabled>Copy</button>
+              <button id="downloadBtn" type="button" disabled>CSV</button>
+            </div>
+          </div>
+          <div id="schedule" class="schedule empty">
+            <p>Your matches will appear here.</p>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script src="script.js"></script>
+  </body>
+</html>
