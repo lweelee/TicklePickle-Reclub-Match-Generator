@@ -41,6 +41,8 @@ const el = {
 };
 
 let lastSchedule = null;
+let lastResult = null;
+let editingMatch = null;
 let generationCount = 0;
 
 function parsePlayers(text) {
@@ -252,7 +254,7 @@ function makeSinglesMatch(group) {
   return { teamA: [group[0]], teamB: [group[1]] };
 }
 
-function generateSchedule() {
+function getSessionConfig() {
   const players = parsePlayers(el.playersInput.value);
   const fixedPairsResult = parseFixedPairs(el.fixedPairsInput.value, players);
   const units = makeUnits(players, fixedPairsResult.pairs, fixedPairsResult.pairedIds);
@@ -260,10 +262,13 @@ function generateSchedule() {
   const rounds = clamp(Number.parseInt(el.roundCount.value, 10), 1, 50);
   const playersPerCourt = Number.parseInt(el.playersPerCourt.value, 10);
   const capacity = courts * playersPerCourt;
-  const partnerCounts = new Map();
-  const sitOutCounts = new Map(players.map((player) => [player.id, 0]));
-  const schedule = [];
-  const seedOffset = generationCount * 100000;
+
+  return { players, fixedPairsResult, units, courts, rounds, playersPerCourt, capacity };
+}
+
+function generateSchedule() {
+  const config = getSessionConfig();
+  const { players, fixedPairsResult, courts, rounds, playersPerCourt } = config;
 
   if (players.length < playersPerCourt) {
     return { error: `Add at least ${playersPerCourt} players to generate a match.` };
@@ -273,7 +278,19 @@ function generateSchedule() {
     return { error: "Fixed pairs are only available for doubles sessions." };
   }
 
-  for (let roundIndex = 0; roundIndex < rounds; roundIndex += 1) {
+  const partnerCounts = new Map();
+  const sitOutCounts = new Map(players.map((player) => [player.id, 0]));
+  const seedOffset = generationCount * 100000;
+  const schedule = generateRoundsFrom(0, config, sitOutCounts, partnerCounts, seedOffset);
+
+  return { schedule, players, courts, rounds, playersPerCourt, warnings: fixedPairsResult.warnings };
+}
+
+function generateRoundsFrom(startRoundIndex, config, sitOutCounts, partnerCounts, seedOffset) {
+  const { players, units, courts, rounds, playersPerCourt, capacity } = config;
+  const schedule = [];
+
+  for (let roundIndex = startRoundIndex; roundIndex < rounds; roundIndex += 1) {
     const activeUnits = chooseUnitsForRound(units, Math.min(players.length, capacity), sitOutCounts, el.rotateSits.checked, roundIndex, seedOffset);
     const active = activeUnits.flatMap((unit) => unit.players);
     const activeIds = new Set(active.map((player) => player.id));
@@ -302,7 +319,7 @@ function generateSchedule() {
     schedule.push({ round: roundIndex + 1, matches, sitOuts });
   }
 
-  return { schedule, players, courts, rounds, warnings: fixedPairsResult.warnings };
+  return schedule;
 }
 
 function clamp(value, min, max) {
@@ -313,6 +330,8 @@ function clamp(value, min, max) {
 function renderSchedule(result) {
   if (result.error) {
     lastSchedule = null;
+    lastResult = null;
+    editingMatch = null;
     el.schedule.className = "schedule";
     el.schedule.innerHTML = `<div class="warning">${escapeHtml(result.error)}</div>`;
     el.statusText.textContent = "More players needed.";
@@ -322,6 +341,7 @@ function renderSchedule(result) {
   }
 
   lastSchedule = result.schedule;
+  lastResult = result;
   const totalMatches = result.schedule.reduce((sum, round) => sum + round.matches.length, 0);
   el.statusText.textContent = `${totalMatches} matches across ${result.rounds} round${result.rounds === 1 ? "" : "s"}.${result.warnings?.length ? ` ${result.warnings.length} fixed-pair note${result.warnings.length === 1 ? "" : "s"}.` : ""}`;
   el.copyBtn.disabled = false;
@@ -335,29 +355,50 @@ function renderSchedule(result) {
           <span class="sitOuts">${round.sitOuts.length ? `Sitting out: ${round.sitOuts.map((player) => escapeHtml(player.name)).join(", ")}` : "Everyone plays"}</span>
         </div>
         <div class="matchGrid">
-          ${round.matches.map(renderMatch).join("")}
+          ${round.matches.map((match, matchIndex) => renderMatch(match, round.round - 1, matchIndex)).join("")}
         </div>
       </section>
     `)
     .join("")}`;
 }
 
-function renderMatch(match) {
+function renderMatch(match, roundIndex, matchIndex) {
+  const isEditing = editingMatch?.roundIndex === roundIndex && editingMatch?.matchIndex === matchIndex;
+  const playerOptions = lastResult?.players || [];
+
   return `
-    <article class="match">
-      <div class="courtLabel">Court ${match.court}</div>
+    <article class="match" data-round-index="${roundIndex}" data-match-index="${matchIndex}">
+      <div class="courtLabel">
+        <span>Court ${match.court}</span>
+        ${isEditing ? `
+          <span class="editActions">
+            <button type="button" class="saveEdit" data-round-index="${roundIndex}" data-match-index="${matchIndex}">Save</button>
+            <button type="button" class="cancelEdit">Cancel</button>
+          </span>
+        ` : `<button type="button" class="editMatch" data-round-index="${roundIndex}" data-match-index="${matchIndex}">Edit</button>`}
+      </div>
       <div class="teams">
         <div class="team">
           <span class="teamName">Team A</span>
-          <span class="players">${match.teamA.map((player) => escapeHtml(player.name)).join(" / ")}</span>
+          ${isEditing ? renderPlayerSelects("teamA", match.teamA, playerOptions) : `<span class="players">${match.teamA.map((player) => escapeHtml(player.name)).join(" / ")}</span>`}
         </div>
         <div class="team">
           <span class="teamName">Team B</span>
-          <span class="players">${match.teamB.map((player) => escapeHtml(player.name)).join(" / ")}</span>
+          ${isEditing ? renderPlayerSelects("teamB", match.teamB, playerOptions) : `<span class="players">${match.teamB.map((player) => escapeHtml(player.name)).join(" / ")}</span>`}
         </div>
       </div>
     </article>
   `;
+}
+
+function renderPlayerSelects(teamName, team, players) {
+  return team
+    .map((player, index) => `
+      <select class="playerSelect" data-team="${teamName}" data-slot="${index}">
+        ${players.map((option) => `<option value="${escapeHtml(option.id)}"${option.id === player.id ? " selected" : ""}>${escapeHtml(option.name)}</option>`).join("")}
+      </select>
+    `)
+    .join("");
 }
 
 function scheduleToCsv(schedule) {
@@ -376,6 +417,116 @@ function scheduleToCsv(schedule) {
     });
   });
   return rows.map((row) => row.map(csvCell).join(",")).join("\n");
+}
+
+function startEdit(roundIndex, matchIndex) {
+  editingMatch = { roundIndex, matchIndex };
+  renderSchedule(lastResult);
+}
+
+function cancelEdit() {
+  editingMatch = null;
+  renderSchedule(lastResult);
+}
+
+function saveEditedMatch(roundIndex, matchIndex) {
+  if (!lastResult) return;
+
+  const matchCard = el.schedule.querySelector(`[data-round-index="${roundIndex}"][data-match-index="${matchIndex}"]`);
+  if (!matchCard) return;
+
+  const playersById = new Map(lastResult.players.map((player) => [player.id, player]));
+  const selectedIds = Array.from(matchCard.querySelectorAll(".playerSelect")).map((select) => select.value);
+  const uniqueIds = new Set(selectedIds);
+
+  if (uniqueIds.size !== selectedIds.length) {
+    showTransientStatus("Each slot in a match needs a different player.");
+    return;
+  }
+
+  const teamA = Array.from(matchCard.querySelectorAll('[data-team="teamA"]')).map((select) => playersById.get(select.value));
+  const teamB = Array.from(matchCard.querySelectorAll('[data-team="teamB"]')).map((select) => playersById.get(select.value));
+  const editedSchedule = cloneSchedule(lastResult.schedule);
+  editedSchedule[roundIndex].matches[matchIndex] = {
+    ...editedSchedule[roundIndex].matches[matchIndex],
+    teamA,
+    teamB
+  };
+  editedSchedule[roundIndex].sitOuts = getRoundSitOuts(editedSchedule[roundIndex], lastResult.players);
+
+  const duplicate = findDuplicateActivePlayer(editedSchedule[roundIndex]);
+  if (duplicate) {
+    showTransientStatus(`${duplicate.name} is already playing elsewhere in Round ${roundIndex + 1}.`);
+    return;
+  }
+
+  const rebuilt = rebuildAfterManualEdit(editedSchedule, roundIndex);
+  editingMatch = null;
+  renderSchedule({ ...lastResult, schedule: rebuilt.schedule, warnings: [...(lastResult.warnings || []), ...rebuilt.warnings] });
+}
+
+function rebuildAfterManualEdit(schedule, editedRoundIndex) {
+  const config = getSessionConfig();
+  const preserved = schedule.slice(0, editedRoundIndex + 1);
+  const partnerCounts = new Map();
+  const sitOutCounts = new Map(config.players.map((player) => [player.id, 0]));
+
+  preserved.forEach((round) => {
+    const activeIds = new Set();
+    round.matches.forEach((match) => {
+      [...match.teamA, ...match.teamB].forEach((player) => activeIds.add(player.id));
+      if (match.teamA.length === 2) {
+        partnerCounts.set(pairKey(match.teamA[0], match.teamA[1]), (partnerCounts.get(pairKey(match.teamA[0], match.teamA[1])) || 0) + 1);
+      }
+      if (match.teamB.length === 2) {
+        partnerCounts.set(pairKey(match.teamB[0], match.teamB[1]), (partnerCounts.get(pairKey(match.teamB[0], match.teamB[1])) || 0) + 1);
+      }
+    });
+    config.players.forEach((player) => {
+      if (!activeIds.has(player.id)) sitOutCounts.set(player.id, sitOutCounts.get(player.id) + 1);
+    });
+  });
+
+  const future = generateRoundsFrom(editedRoundIndex + 1, config, sitOutCounts, partnerCounts, generationCount * 100000);
+  return {
+    schedule: [...preserved, ...future],
+    warnings: config.fixedPairsResult.warnings
+  };
+}
+
+function cloneSchedule(schedule) {
+  return schedule.map((round) => ({
+    round: round.round,
+    sitOuts: [...round.sitOuts],
+    matches: round.matches.map((match) => ({
+      court: match.court,
+      teamA: [...match.teamA],
+      teamB: [...match.teamB]
+    }))
+  }));
+}
+
+function getRoundSitOuts(round, players) {
+  const activeIds = new Set(round.matches.flatMap((match) => [...match.teamA, ...match.teamB].map((player) => player.id)));
+  return players.filter((player) => !activeIds.has(player.id));
+}
+
+function findDuplicateActivePlayer(round) {
+  const seen = new Set();
+  const activePlayers = round.matches.flatMap((match) => [...match.teamA, ...match.teamB]);
+  return activePlayers.find((player) => {
+    if (seen.has(player.id)) return true;
+    seen.add(player.id);
+    return false;
+  });
+}
+
+function showTransientStatus(message) {
+  const original = el.statusText.textContent;
+  el.statusText.textContent = message;
+  window.setTimeout(() => {
+    el.statusText.textContent = original;
+  }, 2200);
 }
 
 function csvCell(value) {
@@ -463,16 +614,35 @@ function attachEvents() {
   });
   el.generateBtn.addEventListener("click", () => {
     generationCount += 1;
+    editingMatch = null;
     renderSchedule(generateSchedule());
   });
   el.downloadBtn.addEventListener("click", downloadCsv);
   el.copyBtn.addEventListener("click", copyCsv);
+  el.schedule.addEventListener("click", (event) => {
+    const editButton = event.target.closest(".editMatch");
+    const saveButton = event.target.closest(".saveEdit");
+    const cancelButton = event.target.closest(".cancelEdit");
+
+    if (editButton) {
+      startEdit(Number.parseInt(editButton.dataset.roundIndex, 10), Number.parseInt(editButton.dataset.matchIndex, 10));
+    }
+
+    if (saveButton) {
+      saveEditedMatch(Number.parseInt(saveButton.dataset.roundIndex, 10), Number.parseInt(saveButton.dataset.matchIndex, 10));
+    }
+
+    if (cancelButton) {
+      cancelEdit();
+    }
+  });
   el.loadSample.addEventListener("click", () => {
     el.playersInput.value = samplePlayers.join("\n");
     el.fixedPairsInput.value = sampleFixedPairs.join("\n");
     updateSummary();
     storeSettings();
     generationCount += 1;
+    editingMatch = null;
     renderSchedule(generateSchedule());
   });
 }

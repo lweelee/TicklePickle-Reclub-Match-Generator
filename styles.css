@@ -325,11 +325,38 @@ select {
 }
 
 .courtLabel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   background: var(--court-dark);
   color: white;
   padding: 9px 12px;
   font-size: 0.84rem;
   font-weight: 850;
+}
+
+.courtLabel button,
+.editActions button {
+  border: 1px solid rgba(255, 255, 255, 0.52);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.12);
+  color: white;
+  cursor: pointer;
+  font-size: 0.76rem;
+  font-weight: 850;
+  min-height: 28px;
+  padding: 0 8px;
+}
+
+.courtLabel button:hover,
+.editActions button:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.editActions {
+  display: flex;
+  gap: 6px;
 }
 
 .teams {
@@ -358,6 +385,13 @@ select {
 .players {
   font-weight: 750;
   line-height: 1.3;
+}
+
+.playerSelect {
+  min-height: 36px;
+  margin-top: 4px;
+  padding: 0 8px;
+  font-weight: 750;
 }
 
 .warning {
