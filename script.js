@@ -49,6 +49,10 @@ let lastResult = null;
 let editingMatch = null;
 let generationCount = 0;
 let activeScoreboardKey = null;
+let activeCloudSessionId = null;
+let activeCloudScores = {};
+let cloudApiPromise = null;
+let lastCloudSessionId = null;
 
 function parsePlayers(text) {
   const seen = new Set();
@@ -494,6 +498,50 @@ function makePublicSchedule(result) {
   };
 }
 
+function hasFirebaseConfig() {
+  const config = window.TICKLEPICKLE_FIREBASE_CONFIG;
+  return Boolean(config?.apiKey && config?.databaseURL && config?.projectId && config?.appId);
+}
+
+async function loadCloudApi() {
+  if (!hasFirebaseConfig()) return null;
+  if (cloudApiPromise) return cloudApiPromise;
+
+  cloudApiPromise = Promise.all([
+    import("https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js"),
+    import("https://www.gstatic.com/firebasejs/10.12.5/firebase-database.js")
+  ]).then(([appModule, databaseModule]) => {
+    const app = appModule.initializeApp(window.TICKLEPICKLE_FIREBASE_CONFIG);
+    const database = databaseModule.getDatabase(app);
+    return { database, ...databaseModule };
+  });
+
+  return cloudApiPromise;
+}
+
+function createSessionId() {
+  const bytes = new Uint8Array(12);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function createCloudScoreboardSession() {
+  const cloud = await loadCloudApi();
+  if (!cloud || !lastResult) return null;
+
+  if (lastCloudSessionId) return lastCloudSessionId;
+
+  const sessionId = createSessionId();
+  const publicSchedule = makePublicSchedule(lastResult);
+  await cloud.set(cloud.ref(cloud.database, `sessions/${sessionId}`), {
+    createdAt: Date.now(),
+    schedule: publicSchedule,
+    scores: {}
+  });
+  lastCloudSessionId = sessionId;
+  return sessionId;
+}
+
 function encodeScoreboardData(data) {
   const json = JSON.stringify(data);
   const bytes = new TextEncoder().encode(json);
@@ -511,19 +559,27 @@ function decodeScoreboardData(encoded) {
   return JSON.parse(new TextDecoder().decode(bytes));
 }
 
-function getScoreboardUrl() {
+async function getScoreboardUrl() {
   if (!lastResult) return "";
+  try {
+    const sessionId = await createCloudScoreboardSession();
+    if (sessionId) {
+      return `${window.location.origin}${window.location.pathname}#session=${sessionId}`;
+    }
+  } catch {
+    el.statusText.textContent = "Live scoreboard setup failed, so a local-only link was created.";
+  }
   const data = encodeScoreboardData(makePublicSchedule(lastResult));
   return `${window.location.origin}${window.location.pathname}#scoreboard=${data}`;
 }
 
-function openScoreboard() {
-  const url = getScoreboardUrl();
+async function openScoreboard() {
+  const url = await getScoreboardUrl();
   if (url) window.open(url, "_blank", "noopener");
 }
 
 async function copyScoreboardLink() {
-  const url = getScoreboardUrl();
+  const url = await getScoreboardUrl();
   if (!url) return;
   el.scoreboardLink.value = url;
   el.sharePanel.hidden = false;
@@ -549,7 +605,31 @@ function getScoreboardFromUrl() {
   }
 }
 
-function renderScoreboardPage(data) {
+function getCloudSessionIdFromUrl() {
+  const match = window.location.hash.match(/^#session=([a-f0-9]+)$/);
+  return match ? match[1] : null;
+}
+
+async function loadCloudScoreboardSession(sessionId) {
+  const cloud = await loadCloudApi();
+  if (!cloud) return null;
+
+  const snapshot = await cloud.get(cloud.ref(cloud.database, `sessions/${sessionId}/schedule`));
+  if (!snapshot.exists()) return null;
+  return snapshot.val();
+}
+
+async function subscribeCloudScores(sessionId) {
+  const cloud = await loadCloudApi();
+  if (!cloud) return;
+
+  cloud.onValue(cloud.ref(cloud.database, `sessions/${sessionId}/scores`), (snapshot) => {
+    activeCloudScores = snapshot.val() || {};
+    applyScoresToCards(activeCloudScores);
+  });
+}
+
+function renderScoreboardPage(data, options = {}) {
   document.body.classList.add("scoreboardMode");
   document.querySelector("h1").textContent = "TicklePickle Scoreboard";
   document.querySelector(".lede").textContent = "Enter scores by court and round.";
@@ -557,10 +637,11 @@ function renderScoreboardPage(data) {
   el.playerCount.textContent = `${data.rounds.length} round${data.rounds.length === 1 ? "" : "s"}`;
   el.courtSummary.textContent = `${Math.max(...data.rounds.map((round) => round.matches.length), 0)} courts`;
   el.roundSummary.textContent = "Scores";
-  el.statusText.textContent = "Scores save on this device.";
+  el.statusText.textContent = options.cloud ? "Scores update live across devices." : "Scores save on this device.";
   el.schedule.className = "scoreboard";
-  activeScoreboardKey = `ticklePickleScores:${window.location.hash}`;
-  const savedScores = readScoreboardScores();
+  activeCloudSessionId = options.sessionId || null;
+  activeScoreboardKey = activeCloudSessionId ? null : `ticklePickleScores:${window.location.hash}`;
+  const savedScores = activeCloudSessionId ? activeCloudScores : readScoreboardScores();
 
   el.schedule.innerHTML = data.rounds
     .map((round, roundIndex) => `
@@ -604,10 +685,11 @@ function renderScoreMatch(match, roundIndex, matchIndex, savedScores) {
 }
 
 function scoreKey(roundIndex, matchIndex) {
-  return `${roundIndex}:${matchIndex}`;
+  return `${roundIndex}-${matchIndex}`;
 }
 
 function readScoreboardScores() {
+  if (activeCloudSessionId) return activeCloudScores;
   if (!activeScoreboardKey) return {};
   try {
     return JSON.parse(localStorage.getItem(activeScoreboardKey)) || {};
@@ -624,7 +706,32 @@ function writeScoreboardScore(card) {
     teamB: card.querySelector('[data-team="teamB"]').value,
     done: card.querySelector(".scoreDone").checked
   };
+  if (activeCloudSessionId) {
+    writeCloudScore(key, scores[key]);
+    return;
+  }
   localStorage.setItem(activeScoreboardKey, JSON.stringify(scores));
+}
+
+async function writeCloudScore(key, score) {
+  const cloud = await loadCloudApi();
+  if (!cloud || !activeCloudSessionId) return;
+  try {
+    await cloud.set(cloud.ref(cloud.database, `sessions/${activeCloudSessionId}/scores/${key}`), score);
+  } catch {
+    el.statusText.textContent = "Score could not sync. Check your connection.";
+  }
+}
+
+function applyScoresToCards(scores) {
+  Object.entries(scores).forEach(([key, score]) => {
+    const [roundIndex, matchIndex] = key.split("-");
+    const card = el.schedule.querySelector(`[data-round-index="${roundIndex}"][data-match-index="${matchIndex}"]`);
+    if (!card) return;
+    card.querySelector('[data-team="teamA"]').value = score.teamA || "";
+    card.querySelector('[data-team="teamB"]').value = score.teamB || "";
+    card.querySelector(".scoreDone").checked = Boolean(score.done);
+  });
 }
 
 function startEdit(roundIndex, matchIndex) {
@@ -869,12 +976,34 @@ function attachScoreboardEvents() {
   });
 }
 
-const scoreboardData = getScoreboardFromUrl();
-if (scoreboardData) {
-  renderScoreboardPage(scoreboardData);
-  attachScoreboardEvents();
-} else {
+async function startApp() {
+  const cloudSessionId = getCloudSessionIdFromUrl();
+  if (cloudSessionId) {
+    const cloudSchedule = await loadCloudScoreboardSession(cloudSessionId);
+    if (cloudSchedule) {
+      renderScoreboardPage(cloudSchedule, { cloud: true, sessionId: cloudSessionId });
+      attachScoreboardEvents();
+      await subscribeCloudScores(cloudSessionId);
+      return;
+    }
+
+    document.body.classList.add("scoreboardMode");
+    el.schedule.className = "schedule";
+    el.schedule.innerHTML = `<div class="warning">This live scoreboard could not be loaded. Check Firebase setup or create a new scoreboard link.</div>`;
+    el.statusText.textContent = "Scoreboard unavailable.";
+    return;
+  }
+
+  const scoreboardData = getScoreboardFromUrl();
+  if (scoreboardData) {
+    renderScoreboardPage(scoreboardData);
+    attachScoreboardEvents();
+    return;
+  }
+
   restoreSettings();
   attachEvents();
   updateSummary();
 }
+
+startApp();
