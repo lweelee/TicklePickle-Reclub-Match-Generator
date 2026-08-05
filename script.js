@@ -55,10 +55,12 @@ function parsePlayers(text) {
       const [namePart, skillPart] = line.split(",").map((part) => part.trim());
       const name = namePart || `Player ${index + 1}`;
       const skill = Number.parseFloat(skillPart);
+      const hasRating = Number.isFinite(skill);
       return {
         id: playerId(name) || `player-${index}`,
         name,
-        skill: Number.isFinite(skill) ? skill : 3
+        skill: hasRating ? skill : 3,
+        hasRating
       };
     })
     .filter((player) => {
@@ -187,6 +189,7 @@ function unitName(unit) {
 function sortUnitsForBalance(units, balanceStyle, roundIndex, seedOffset) {
   if (balanceStyle === "shuffle") return shuffle(units, 2000 + seedOffset + roundIndex * 31);
   if (balanceStyle === "skill") return [...units].sort((a, b) => unitSkill(a) - unitSkill(b));
+  if (balanceStyle === "mentor") return sortUnitsHighLow(units, roundIndex, seedOffset);
 
   const lowToHigh = [...units].sort((a, b) => unitSkill(a) - unitSkill(b));
   const mixed = [];
@@ -199,6 +202,34 @@ function sortUnitsForBalance(units, balanceStyle, roundIndex, seedOffset) {
 
 function unitSkill(unit) {
   return unit.players.reduce((sum, player) => sum + player.skill, 0) / unit.players.length;
+}
+
+function effectivePlayerSkill(player, balanceStyle) {
+  if (balanceStyle === "mentor" && !player.hasRating) return 2.5;
+  return player.skill;
+}
+
+function effectiveTeamSkill(team, balanceStyle) {
+  return team.reduce((sum, player) => sum + effectivePlayerSkill(player, balanceStyle), 0);
+}
+
+function effectiveUnitSkill(unit, balanceStyle) {
+  return unit.players.reduce((sum, player) => sum + effectivePlayerSkill(player, balanceStyle), 0) / unit.players.length;
+}
+
+function sortUnitsHighLow(units, roundIndex, seedOffset) {
+  const lowToHigh = shuffle(units, 4100 + seedOffset + roundIndex * 31)
+    .sort((a, b) => effectiveUnitSkill(a, "mentor") - effectiveUnitSkill(b, "mentor"));
+  const mixed = [];
+
+  while (lowToHigh.length) {
+    const low = lowToHigh.shift();
+    if (low) mixed.push(low);
+    const high = lowToHigh.pop();
+    if (high) mixed.push(high);
+  }
+
+  return mixed;
 }
 
 function buildCourtGroups(units, playersPerCourt, courts) {
@@ -222,7 +253,7 @@ function buildCourtGroups(units, playersPerCourt, courts) {
   return groups;
 }
 
-function makeDoublesMatch(units, partnerCounts, avoidRepeats) {
+function makeDoublesMatch(units, partnerCounts, avoidRepeats, balanceStyle) {
   const group = units.flatMap((unit) => unit.players);
   if (group.length < 4) return null;
 
@@ -240,13 +271,31 @@ function makeDoublesMatch(units, partnerCounts, avoidRepeats) {
 
   return candidates
     .map(([teamA, teamB]) => {
-      const skillGap = Math.abs(teamA[0].skill + teamA[1].skill - teamB[0].skill - teamB[1].skill);
+      const skillGap = Math.abs(effectiveTeamSkill(teamA, balanceStyle) - effectiveTeamSkill(teamB, balanceStyle));
       const repeatPenalty = avoidRepeats
         ? (partnerCounts.get(pairKey(teamA[0], teamA[1])) || 0) + (partnerCounts.get(pairKey(teamB[0], teamB[1])) || 0)
         : 0;
-      return { teamA, teamB, score: skillGap + repeatPenalty * 3 };
+      const highLowScore = balanceStyle === "mentor" ? highLowPairPenalty(teamA) + highLowPairPenalty(teamB) : 0;
+      const sameRatingScore = balanceStyle === "mentor" ? sameRatingPairPenalty(teamA) + sameRatingPairPenalty(teamB) : 0;
+      return { teamA, teamB, score: skillGap * 2 + highLowScore + sameRatingScore + repeatPenalty * 3 };
     })
     .sort((a, b) => a.score - b.score)[0];
+}
+
+function highLowPairPenalty(team) {
+  const lowCount = team.filter(isLowOrUnrated).length;
+  if (lowCount === 2) return 8;
+  if (lowCount === 0) return 2;
+  return 0;
+}
+
+function sameRatingPairPenalty(team) {
+  const gap = Math.abs(effectivePlayerSkill(team[0], "mentor") - effectivePlayerSkill(team[1], "mentor"));
+  return Math.max(0, 1.25 - gap);
+}
+
+function isLowOrUnrated(player) {
+  return !player.hasRating || player.skill <= 3;
 }
 
 function makeSinglesMatch(group) {
@@ -303,7 +352,7 @@ function generateRoundsFrom(startRoundIndex, config, sitOutCounts, partnerCounts
     const matches = [];
     groups.forEach((group, court) => {
       const match = playersPerCourt === 4
-        ? makeDoublesMatch(group, partnerCounts, el.avoidRepeats.checked)
+        ? makeDoublesMatch(group, partnerCounts, el.avoidRepeats.checked, el.balanceStyle.value)
         : makeSinglesMatch(group.flatMap((unit) => unit.players));
       if (!match) return;
 
