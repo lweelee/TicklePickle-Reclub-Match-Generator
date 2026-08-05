@@ -48,6 +48,7 @@ let lastSchedule = null;
 let lastResult = null;
 let editingMatch = null;
 let generationCount = 0;
+let generationSalt = Date.now();
 let activeScoreboardKey = null;
 let activeCloudSessionId = null;
 let activeCloudScores = {};
@@ -88,6 +89,15 @@ function shuffle(items, seed) {
     [copy[index], copy[swapIndex]] = [copy[swapIndex], copy[index]];
   }
   return copy;
+}
+
+function nextGenerationSeed() {
+  if (window.crypto?.getRandomValues) {
+    const values = new Uint32Array(1);
+    window.crypto.getRandomValues(values);
+    return values[0];
+  }
+  return Date.now() % 4294967296;
 }
 
 function pairKey(a, b) {
@@ -241,7 +251,7 @@ function sortUnitsHighLow(units, roundIndex, seedOffset) {
   return mixed;
 }
 
-function buildCourtGroups(units, playersPerCourt, courts) {
+function buildCourtGroups(units, playersPerCourt, courts, partnerCounts, avoidRepeats) {
   const remaining = [...units];
   const groups = [];
 
@@ -249,7 +259,7 @@ function buildCourtGroups(units, playersPerCourt, courts) {
     const group = [];
     while (group.flatMap((unit) => unit.players).length < playersPerCourt) {
       const needed = playersPerCourt - group.flatMap((unit) => unit.players).length;
-      const nextIndex = remaining.findIndex((unit) => unit.players.length <= needed);
+      const nextIndex = chooseNextUnitIndex(remaining, group, needed, partnerCounts, avoidRepeats);
       if (nextIndex === -1) break;
       group.push(...remaining.splice(nextIndex, 1));
     }
@@ -260,6 +270,139 @@ function buildCourtGroups(units, playersPerCourt, courts) {
   }
 
   return groups;
+}
+
+function buildDoublesMatchesFromUnits(units, courts, partnerCounts, avoidRepeats, balanceStyle) {
+  const teams = buildDoublesTeams(units, partnerCounts, avoidRepeats, balanceStyle);
+  const matches = [];
+
+  while (teams.length >= 2 && matches.length < courts) {
+    const [teamA, teamB] = chooseBestTeamMatch(teams, balanceStyle);
+    matches.push({
+      court: matches.length + 1,
+      teamA: teamA.players,
+      teamB: teamB.players
+    });
+  }
+
+  return matches;
+}
+
+function buildDoublesTeams(units, partnerCounts, avoidRepeats, balanceStyle) {
+  const fixedTeams = units
+    .filter((unit) => unit.fixed && unit.players.length === 2)
+    .map((unit) => ({ players: unit.players, fixed: true }));
+  const singles = units
+    .filter((unit) => unit.players.length === 1)
+    .map((unit) => unit.players[0]);
+  const teams = [...fixedTeams];
+  choosePlayerPairings(singles, partnerCounts, avoidRepeats, balanceStyle)
+    .forEach((team) => teams.push({ players: team, fixed: false }));
+
+  return teams;
+}
+
+function choosePlayerPairings(players, partnerCounts, avoidRepeats, balanceStyle) {
+  if (players.length > 16) {
+    return chooseGreedyPlayerPairings(players, partnerCounts, avoidRepeats, balanceStyle);
+  }
+
+  let best = { score: Number.POSITIVE_INFINITY, teams: [] };
+
+  function search(remaining, teams, score) {
+    if (score >= best.score) return;
+    if (remaining.length < 2) {
+      best = { score, teams };
+      return;
+    }
+
+    const first = remaining[0];
+    for (let index = 1; index < remaining.length; index += 1) {
+      const second = remaining[index];
+      const team = [first, second];
+      const nextRemaining = remaining.slice(1, index).concat(remaining.slice(index + 1));
+      search(nextRemaining, [...teams, team], score + playerPairScore(team, partnerCounts, avoidRepeats, balanceStyle));
+    }
+  }
+
+  search(players, [], 0);
+  return best.teams;
+}
+
+function chooseGreedyPlayerPairings(players, partnerCounts, avoidRepeats, balanceStyle) {
+  const remaining = [...players];
+  const teams = [];
+
+  while (remaining.length >= 2) {
+    let best = { firstIndex: 0, secondIndex: 1, score: Number.POSITIVE_INFINITY };
+    for (let firstIndex = 0; firstIndex < remaining.length; firstIndex += 1) {
+      for (let secondIndex = firstIndex + 1; secondIndex < remaining.length; secondIndex += 1) {
+        const score = playerPairScore([remaining[firstIndex], remaining[secondIndex]], partnerCounts, avoidRepeats, balanceStyle);
+        if (score < best.score) best = { firstIndex, secondIndex, score };
+      }
+    }
+
+    teams.push([remaining[best.firstIndex], remaining[best.secondIndex]]);
+    remaining.splice(Math.max(best.firstIndex, best.secondIndex), 1);
+    remaining.splice(Math.min(best.firstIndex, best.secondIndex), 1);
+  }
+
+  return teams;
+}
+
+function playerPairScore(team, partnerCounts, avoidRepeats, balanceStyle) {
+  const repeatCount = partnerCounts.get(pairKey(team[0], team[1])) || 0;
+  return (
+    (avoidRepeats ? repeatCount * 100 : 0) +
+    (balanceStyle === "mentor" ? highLowPairPenalty(team) * 4 + sameRatingPairPenalty(team) : 0)
+  );
+}
+
+function chooseBestTeamMatch(teams, balanceStyle) {
+  const candidates = [];
+  for (let firstIndex = 0; firstIndex < teams.length; firstIndex += 1) {
+    for (let secondIndex = firstIndex + 1; secondIndex < teams.length; secondIndex += 1) {
+      const teamA = teams[firstIndex];
+      const teamB = teams[secondIndex];
+      candidates.push({
+        firstIndex,
+        secondIndex,
+        score: Math.abs(effectiveTeamSkill(teamA.players, balanceStyle) - effectiveTeamSkill(teamB.players, balanceStyle))
+      });
+    }
+  }
+
+  const best = candidates.sort((a, b) => a.score - b.score || a.firstIndex - b.firstIndex || a.secondIndex - b.secondIndex)[0];
+  const teamA = teams[best.firstIndex];
+  const teamB = teams[best.secondIndex];
+  teams.splice(Math.max(best.firstIndex, best.secondIndex), 1);
+  teams.splice(Math.min(best.firstIndex, best.secondIndex), 1);
+  return [teamA, teamB];
+}
+
+function chooseNextUnitIndex(remaining, group, needed, partnerCounts, avoidRepeats) {
+  const candidates = remaining
+    .map((unit, index) => ({ unit, index }))
+    .filter(({ unit }) => unit.players.length <= needed);
+
+  if (!candidates.length) return -1;
+  if (!group.length || !avoidRepeats) return candidates[0].index;
+
+  return candidates
+    .map((candidate) => ({
+      ...candidate,
+      score: unitCourtRepeatScore(candidate.unit, group, partnerCounts)
+    }))
+    .sort((a, b) => a.score - b.score || a.index - b.index)[0].index;
+}
+
+function unitCourtRepeatScore(unit, group, partnerCounts) {
+  const existingPlayers = group.flatMap((groupUnit) => groupUnit.players);
+  return unit.players.reduce((score, player) => {
+    return score + existingPlayers.reduce((sum, existingPlayer) => {
+      return sum + (partnerCounts.get(pairKey(player, existingPlayer)) || 0);
+    }, 0);
+  }, 0);
 }
 
 function makeDoublesMatch(units, partnerCounts, avoidRepeats, balanceStyle) {
@@ -286,7 +429,7 @@ function makeDoublesMatch(units, partnerCounts, avoidRepeats, balanceStyle) {
         : 0;
       const highLowScore = balanceStyle === "mentor" ? highLowPairPenalty(teamA) + highLowPairPenalty(teamB) : 0;
       const sameRatingScore = balanceStyle === "mentor" ? sameRatingPairPenalty(teamA) + sameRatingPairPenalty(teamB) : 0;
-      return { teamA, teamB, score: skillGap * 2 + highLowScore + sameRatingScore + repeatPenalty * 3 };
+      return { teamA, teamB, score: repeatPenalty * 40 + skillGap * 2 + highLowScore + sameRatingScore };
     })
     .sort((a, b) => a.score - b.score)[0];
 }
@@ -338,7 +481,7 @@ function generateSchedule() {
 
   const partnerCounts = new Map();
   const sitOutCounts = new Map(players.map((player) => [player.id, 0]));
-  const seedOffset = generationCount * 100000;
+  const seedOffset = generationSalt + generationCount * 100000;
   const schedule = generateRoundsFrom(0, config, sitOutCounts, partnerCounts, seedOffset);
 
   return { schedule, players, courts, rounds, playersPerCourt, warnings: fixedPairsResult.warnings };
@@ -357,20 +500,23 @@ function generateRoundsFrom(startRoundIndex, config, sitOutCounts, partnerCounts
     });
 
     const sortedUnits = sortUnitsForBalance(activeUnits, el.balanceStyle.value, roundIndex, seedOffset);
-    const groups = buildCourtGroups(sortedUnits, playersPerCourt, courts);
     const matches = [];
-    groups.forEach((group, court) => {
-      const match = playersPerCourt === 4
-        ? makeDoublesMatch(group, partnerCounts, el.avoidRepeats.checked, el.balanceStyle.value)
-        : makeSinglesMatch(group.flatMap((unit) => unit.players));
-      if (!match) return;
+    if (playersPerCourt === 4) {
+      matches.push(...buildDoublesMatchesFromUnits(sortedUnits, courts, partnerCounts, el.avoidRepeats.checked, el.balanceStyle.value));
+    } else {
+      const groups = buildCourtGroups(sortedUnits, playersPerCourt, courts, partnerCounts, el.avoidRepeats.checked);
+      groups.forEach((group, court) => {
+        const match = makeSinglesMatch(group.flatMap((unit) => unit.players));
+        if (!match) return;
+        matches.push({ court: court + 1, ...match });
+      });
+    }
 
+    matches.forEach((match) => {
       if (playersPerCourt === 4) {
         partnerCounts.set(pairKey(match.teamA[0], match.teamA[1]), (partnerCounts.get(pairKey(match.teamA[0], match.teamA[1])) || 0) + 1);
         partnerCounts.set(pairKey(match.teamB[0], match.teamB[1]), (partnerCounts.get(pairKey(match.teamB[0], match.teamB[1])) || 0) + 1);
       }
-
-      matches.push({ court: court + 1, ...match });
     });
 
     const sitOuts = players.filter((player) => !activeIds.has(player.id));
@@ -802,7 +948,7 @@ function rebuildAfterManualEdit(schedule, editedRoundIndex) {
     });
   });
 
-  const future = generateRoundsFrom(editedRoundIndex + 1, config, sitOutCounts, partnerCounts, generationCount * 100000);
+  const future = generateRoundsFrom(editedRoundIndex + 1, config, sitOutCounts, partnerCounts, generationSalt + generationCount * 100000);
   return {
     schedule: [...preserved, ...future],
     warnings: config.fixedPairsResult.warnings
@@ -924,11 +1070,15 @@ function attachEvents() {
   inputs.forEach((input) => {
     input.addEventListener("input", () => {
       updateSummary();
+      lastCloudSessionId = null;
+      el.sharePanel.hidden = true;
       storeSettings();
     });
   });
   el.generateBtn.addEventListener("click", () => {
     generationCount += 1;
+    generationSalt = nextGenerationSeed();
+    lastCloudSessionId = null;
     editingMatch = null;
     renderSchedule(generateSchedule());
   });
@@ -959,6 +1109,8 @@ function attachEvents() {
     updateSummary();
     storeSettings();
     generationCount += 1;
+    generationSalt = nextGenerationSeed();
+    lastCloudSessionId = null;
     editingMatch = null;
     renderSchedule(generateSchedule());
   });
