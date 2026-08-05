@@ -95,12 +95,20 @@
               <p id="statusText">Add players to start.</p>
             </div>
             <div class="actions">
+              <button id="scoreboardBtn" type="button" disabled>Scoreboard</button>
+              <button id="copyScoreboardBtn" type="button" disabled>Share Link</button>
               <button id="copyBtn" type="button" disabled>Copy</button>
               <button id="downloadBtn" type="button" disabled>CSV</button>
             </div>
           </div>
           <div id="schedule" class="schedule empty">
             <p>Your matches will appear here.</p>
+          </div>
+          <div id="sharePanel" class="sharePanel" hidden>
+            <label class="field">
+              <span>Scoreboard player link</span>
+              <input id="scoreboardLink" type="text" readonly />
+            </label>
           </div>
         </section>
       </section>

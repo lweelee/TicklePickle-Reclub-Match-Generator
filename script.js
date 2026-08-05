@@ -32,10 +32,14 @@ const el = {
   generateBtn: document.querySelector("#generateBtn"),
   loadSample: document.querySelector("#loadSample"),
   schedule: document.querySelector("#schedule"),
+  sharePanel: document.querySelector("#sharePanel"),
+  scoreboardLink: document.querySelector("#scoreboardLink"),
   statusText: document.querySelector("#statusText"),
   playerCount: document.querySelector("#playerCount"),
   courtSummary: document.querySelector("#courtSummary"),
   roundSummary: document.querySelector("#roundSummary"),
+  scoreboardBtn: document.querySelector("#scoreboardBtn"),
+  copyScoreboardBtn: document.querySelector("#copyScoreboardBtn"),
   copyBtn: document.querySelector("#copyBtn"),
   downloadBtn: document.querySelector("#downloadBtn")
 };
@@ -44,6 +48,7 @@ let lastSchedule = null;
 let lastResult = null;
 let editingMatch = null;
 let generationCount = 0;
+let activeScoreboardKey = null;
 
 function parsePlayers(text) {
   const seen = new Set();
@@ -384,6 +389,9 @@ function renderSchedule(result) {
     el.schedule.className = "schedule";
     el.schedule.innerHTML = `<div class="warning">${escapeHtml(result.error)}</div>`;
     el.statusText.textContent = "More players needed.";
+    el.sharePanel.hidden = true;
+    el.scoreboardBtn.disabled = true;
+    el.copyScoreboardBtn.disabled = true;
     el.copyBtn.disabled = true;
     el.downloadBtn.disabled = true;
     return;
@@ -393,6 +401,9 @@ function renderSchedule(result) {
   lastResult = result;
   const totalMatches = result.schedule.reduce((sum, round) => sum + round.matches.length, 0);
   el.statusText.textContent = `${totalMatches} matches across ${result.rounds} round${result.rounds === 1 ? "" : "s"}.${result.warnings?.length ? ` ${result.warnings.length} fixed-pair note${result.warnings.length === 1 ? "" : "s"}.` : ""}`;
+  el.scoreboardBtn.disabled = false;
+  el.copyScoreboardBtn.disabled = false;
+  el.sharePanel.hidden = true;
   el.copyBtn.disabled = false;
   el.downloadBtn.disabled = false;
   el.schedule.className = "schedule";
@@ -466,6 +477,154 @@ function scheduleToCsv(schedule) {
     });
   });
   return rows.map((row) => row.map(csvCell).join(",")).join("\n");
+}
+
+function makePublicSchedule(result) {
+  return {
+    createdAt: new Date().toISOString(),
+    rounds: result.schedule.map((round) => ({
+      round: round.round,
+      sitOuts: round.sitOuts.map((player) => player.name),
+      matches: round.matches.map((match) => ({
+        court: match.court,
+        teamA: match.teamA.map((player) => player.name),
+        teamB: match.teamB.map((player) => player.name)
+      }))
+    }))
+  };
+}
+
+function encodeScoreboardData(data) {
+  const json = JSON.stringify(data);
+  const bytes = new TextEncoder().encode(json);
+  let binary = "";
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+}
+
+function decodeScoreboardData(encoded) {
+  const padded = encoded.replaceAll("-", "+").replaceAll("_", "/").padEnd(Math.ceil(encoded.length / 4) * 4, "=");
+  const binary = atob(padded);
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  return JSON.parse(new TextDecoder().decode(bytes));
+}
+
+function getScoreboardUrl() {
+  if (!lastResult) return "";
+  const data = encodeScoreboardData(makePublicSchedule(lastResult));
+  return `${window.location.origin}${window.location.pathname}#scoreboard=${data}`;
+}
+
+function openScoreboard() {
+  const url = getScoreboardUrl();
+  if (url) window.open(url, "_blank", "noopener");
+}
+
+async function copyScoreboardLink() {
+  const url = getScoreboardUrl();
+  if (!url) return;
+  el.scoreboardLink.value = url;
+  el.sharePanel.hidden = false;
+  el.scoreboardLink.select();
+  try {
+    await navigator.clipboard.writeText(url);
+    el.copyScoreboardBtn.textContent = "Copied";
+  } catch {
+    el.copyScoreboardBtn.textContent = "Link Ready";
+  }
+  window.setTimeout(() => {
+    el.copyScoreboardBtn.textContent = "Share Link";
+  }, 1200);
+}
+
+function getScoreboardFromUrl() {
+  const match = window.location.hash.match(/^#scoreboard=(.+)$/);
+  if (!match) return null;
+  try {
+    return decodeScoreboardData(match[1]);
+  } catch {
+    return null;
+  }
+}
+
+function renderScoreboardPage(data) {
+  document.body.classList.add("scoreboardMode");
+  document.querySelector("h1").textContent = "TicklePickle Scoreboard";
+  document.querySelector(".lede").textContent = "Enter scores by court and round.";
+  document.querySelector(".eyebrow").textContent = "Player view";
+  el.playerCount.textContent = `${data.rounds.length} round${data.rounds.length === 1 ? "" : "s"}`;
+  el.courtSummary.textContent = `${Math.max(...data.rounds.map((round) => round.matches.length), 0)} courts`;
+  el.roundSummary.textContent = "Scores";
+  el.statusText.textContent = "Scores save on this device.";
+  el.schedule.className = "scoreboard";
+  activeScoreboardKey = `ticklePickleScores:${window.location.hash}`;
+  const savedScores = readScoreboardScores();
+
+  el.schedule.innerHTML = data.rounds
+    .map((round, roundIndex) => `
+      <section class="scoreRound">
+        <div class="roundTitle">
+          <h3>Round ${round.round}</h3>
+          <span class="sitOuts">${round.sitOuts.length ? `Sitting out: ${round.sitOuts.map(escapeHtml).join(", ")}` : "Everyone plays"}</span>
+        </div>
+        <div class="scoreGrid">
+          ${round.matches.map((match, matchIndex) => renderScoreMatch(match, roundIndex, matchIndex, savedScores)).join("")}
+        </div>
+      </section>
+    `)
+    .join("");
+}
+
+function renderScoreMatch(match, roundIndex, matchIndex, savedScores) {
+  const key = scoreKey(roundIndex, matchIndex);
+  const score = savedScores[key] || { teamA: "", teamB: "", done: false };
+  return `
+    <article class="scoreCard" data-round-index="${roundIndex}" data-match-index="${matchIndex}">
+      <div class="scoreCourt">
+        <span>Court ${match.court}</span>
+        <label class="doneToggle">
+          <input type="checkbox" class="scoreDone"${score.done ? " checked" : ""} />
+          Done
+        </label>
+      </div>
+      <div class="scoreRows">
+        <label class="scoreTeam">
+          <span>${match.teamA.map(escapeHtml).join(" / ")}</span>
+          <input class="scoreInput" data-team="teamA" type="number" min="0" inputmode="numeric" value="${escapeHtml(score.teamA)}" />
+        </label>
+        <label class="scoreTeam">
+          <span>${match.teamB.map(escapeHtml).join(" / ")}</span>
+          <input class="scoreInput" data-team="teamB" type="number" min="0" inputmode="numeric" value="${escapeHtml(score.teamB)}" />
+        </label>
+      </div>
+    </article>
+  `;
+}
+
+function scoreKey(roundIndex, matchIndex) {
+  return `${roundIndex}:${matchIndex}`;
+}
+
+function readScoreboardScores() {
+  if (!activeScoreboardKey) return {};
+  try {
+    return JSON.parse(localStorage.getItem(activeScoreboardKey)) || {};
+  } catch {
+    return {};
+  }
+}
+
+function writeScoreboardScore(card) {
+  const scores = readScoreboardScores();
+  const key = scoreKey(card.dataset.roundIndex, card.dataset.matchIndex);
+  scores[key] = {
+    teamA: card.querySelector('[data-team="teamA"]').value,
+    teamB: card.querySelector('[data-team="teamB"]').value,
+    done: card.querySelector(".scoreDone").checked
+  };
+  localStorage.setItem(activeScoreboardKey, JSON.stringify(scores));
 }
 
 function startEdit(roundIndex, matchIndex) {
@@ -668,6 +827,8 @@ function attachEvents() {
   });
   el.downloadBtn.addEventListener("click", downloadCsv);
   el.copyBtn.addEventListener("click", copyCsv);
+  el.scoreboardBtn.addEventListener("click", openScoreboard);
+  el.copyScoreboardBtn.addEventListener("click", copyScoreboardLink);
   el.schedule.addEventListener("click", (event) => {
     const editButton = event.target.closest(".editMatch");
     const saveButton = event.target.closest(".saveEdit");
@@ -696,6 +857,24 @@ function attachEvents() {
   });
 }
 
-restoreSettings();
-attachEvents();
-updateSummary();
+function attachScoreboardEvents() {
+  el.schedule.addEventListener("input", (event) => {
+    const scoreInput = event.target.closest(".scoreInput");
+    if (scoreInput) writeScoreboardScore(scoreInput.closest(".scoreCard"));
+  });
+
+  el.schedule.addEventListener("change", (event) => {
+    const doneInput = event.target.closest(".scoreDone");
+    if (doneInput) writeScoreboardScore(doneInput.closest(".scoreCard"));
+  });
+}
+
+const scoreboardData = getScoreboardFromUrl();
+if (scoreboardData) {
+  renderScoreboardPage(scoreboardData);
+  attachScoreboardEvents();
+} else {
+  restoreSettings();
+  attachEvents();
+  updateSummary();
+}
